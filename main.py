@@ -1,138 +1,193 @@
 import matplotlib.pyplot as plt
+from matplotlib.patches import Circle
 
-# ==========================================
-# 1. DOMAINS & PROBLEM PARAMETERS
-# ==========================================
-TARGET_RATIO = 6.0        # Target gear ratio
-TOLERANCE = 0.05          # Very tight acceptable deviation (±0.05)
-MAX_CENTER_DIST = 40.0    # Highly restricted spatial envelope (mm)
-MIN_TEETH = 17            # Standard interference limit
-MAX_TEETH = 60            # Standard upper limit per gear
-
-# Discrete domains for the AI to search
-DOMAIN_MODULES = [1.0, 1.25, 1.5, 2.0]
-DOMAIN_TEETH = list(range(MIN_TEETH, MAX_TEETH + 1))
-
-# ==========================================
-# 2. CONSTRAINT FUNCTIONS
-# ==========================================
-def check_center_distance(m, N_drive, N_driven):
-    """Calculates center distance and checks if it fits within bounds."""
-    c_dist = (m * (N_drive + N_driven)) / 2.0
-    return c_dist <= MAX_CENTER_DIST, c_dist
-
-def check_ratio(N1, N2, N3, N4):
-    """Checks if the total compound ratio is within tolerance."""
-    ratio = (N2 / N1) * (N4 / N3)
-    return abs(ratio - TARGET_RATIO) <= TOLERANCE, ratio
-
-# ==========================================
-# 3. BACKTRACKING SEARCH ALGORITHM
-# ==========================================
-def solve_gear_train_csp():
+def calculate_gear_ratio(gears, connections):
     """
-    Classical Backtracking Search. 
-    Variable ordering: m1, m2, N1, N2, N3, N4.
-    Includes early pruning (Forward Checking principle).
+    Calculates the gear ratio defined as (Output Teeth / Input Teeth).
+    A ratio > 1 means torque multiplication (speed reduction).
     """
-    print("Starting AI Backtracking Search...")
+    ratio = 1.0
+    for i in range(len(connections)):
+        if connections[i] == 'MESH':
+            # Driven / Driver
+            ratio *= (gears[i+1][1] / gears[i][1])
+    return ratio
+
+def calculate_linear_length(gears, connections):
+    """
+    Calculates the maximum linear length of the gear train layout.
+    Assumes a straight-line arrangement for the bounding box worst-case constraint.
+    """
+    if not gears:
+        return 0
+    # Start with the radius of the first gear (m * z / 2)
+    length = (gears[0][0] * gears[0][1]) / 2.0
     
-    # Search Tree
-    for m1 in DOMAIN_MODULES:
-        for m2 in DOMAIN_MODULES:
-            for N1 in DOMAIN_TEETH:
-                for N2 in DOMAIN_TEETH:
-                    
-                    # Constraint Check 1: Stage 1 Center Distance
-                    valid_c1, c1_dist = check_center_distance(m1, N1, N2)
-                    if not valid_c1:
-                        continue # Prune branch
-                    
-                    for N3 in DOMAIN_TEETH:
-                        for N4 in DOMAIN_TEETH:
-                            
-                            # Constraint Check 2: Stage 2 Center Distance
-                            valid_c2, c2_dist = check_center_distance(m2, N3, N4)
-                            if not valid_c2:
-                                continue # Prune branch
-                            
-                            # Constraint Check 3: Global Ratio
-                            valid_ratio, actual_ratio = check_ratio(N1, N2, N3, N4)
-                            if valid_ratio:
-                                print("Solution Found!")
-                                return {
-                                    "m1": m1, "N1": N1, "N2": N2, "C1": c1_dist,
-                                    "m2": m2, "N3": N3, "N4": N4, "C2": c2_dist,
-                                    "Ratio": actual_ratio
-                                }
-    
-    print("Search exhausted. No valid configurations found in domain.")
+    for i in range(len(connections)):
+        if connections[i] == 'MESH':
+            # Add center distance between meshing gears
+            center_dist = (gears[i][0] * gears[i][1] + gears[i+1][0] * gears[i+1][1]) / 2.0
+            length += center_dist
+            
+    # Add the radius of the final gear
+    length += (gears[-1][0] * gears[-1][1]) / 2.0
+    return length
+
+def backtrack(gears, connections, max_depth, domain, target_ratio, tolerance, max_length):
+    # Base Case: Reached the target number of gears for this depth iteration
+    if len(gears) == max_depth:
+        # A train ending with a SHAFT connection is mechanically redundant
+        if connections and connections[-1] == 'SHAFT':
+            return None
+            
+        current_ratio = calculate_gear_ratio(gears, connections)
+        if abs(current_ratio - target_ratio) <= tolerance:
+            return gears, connections
+        return None
+
+    for gear in domain:
+        m, z = gear
+        
+        # Base Case: Placing the first gear
+        if not gears:
+            res = backtrack([gear], [], max_depth, domain, target_ratio, tolerance, max_length)
+            if res: return res
+            continue
+
+        # Pruning Constraint: Ensure total length doesn't exceed bounding box
+        # (Evaluated before deep recursion to save cycles)
+        
+        # 1. Try a 'MESH' connection
+        last_m, last_z = gears[-1]
+        if last_m == m: # Meshing gears must have identical modules
+            new_gears = gears + [gear]
+            new_conns = connections + ['MESH']
+            
+            if calculate_linear_length(new_gears, new_conns) <= max_length:
+                res = backtrack(new_gears, new_conns, max_depth, domain, target_ratio, tolerance, max_length)
+                if res: return res
+
+        # 2. Try a 'SHAFT' connection (Compound Gear Train)
+        # Pruning: 
+        # - Don't start with a shaft (first two gears must mesh)
+        # - Don't put three gears on the same shaft (two consecutive SHAFTs)
+        # - Don't end on a shaft (handled in base case, but avoided here if depth is max-1)
+        if len(gears) > 1 and connections[-1] != 'SHAFT' and len(gears) < max_depth - 1:
+            new_gears = gears + [gear]
+            new_conns = connections + ['SHAFT']
+            
+            if calculate_linear_length(new_gears, new_conns) <= max_length:
+                res = backtrack(new_gears, new_conns, max_depth, domain, target_ratio, tolerance, max_length)
+                if res: return res
+
     return None
 
-# ==========================================
-# 4. VISUALIZATION PLAN EXECUTION
-# ==========================================
-def visualize_gears(solution):
-    """Generates a 2D kinematic plot of the valid gear configuration."""
-    if not solution:
+def solve_gear_train(domain, max_gears, max_length, max_width, target_ratio, tolerance):
+    """
+    Main CSP solver.
+    domain: List of tuples (module, teeth)
+    """
+    # 1. Prune domain by Max Width (Diameter Constraint)
+    # Pitch Diameter d = m * z. No gear can be wider than the bounding box.
+    valid_domain = [(m, z) for (m, z) in domain if (m * z) <= max_width]
+    
+    if not valid_domain:
+        return "Failure: No available gears fit within the maximum width."
+
+    # 2. Iterative Deepening
+    # Start at 2 gears. The first valid solution found is guaranteed to be the minimum number of gears.
+    for depth in range(2, max_gears + 1):
+        result = backtrack([], [], depth, valid_domain, target_ratio, tolerance, max_length)
+        if result:
+            gears, connections = result
+            actual_ratio = calculate_gear_ratio(gears, connections)
+            actual_length = calculate_linear_length(gears, connections)
+            
+            return {
+                "gears": gears,
+                "connections": connections,
+                "gear_count": depth,
+                actual_ratio: actual_ratio,
+                "layout_length": actual_length
+            }
+
+    return f"Failure: No valid gear train found within {max_gears} gears."
+
+def visualize_gear_train(gears, connections):
+    """
+    Generates a 2D schematic of the gear train layout using matplotlib.
+    """
+    if not gears:
         return
+
+    fig, ax = plt.subplots(figsize=(10, 5))
     
-    fig, ax = plt.subplots(figsize=(8, 6))
-    ax.set_aspect('equal')
+    current_x = 0.0
+    current_y = 0.0
     
-    # Calculate radii
-    r1 = (solution['m1'] * solution['N1']) / 2
-    r2 = (solution['m1'] * solution['N2']) / 2
-    r3 = (solution['m2'] * solution['N3']) / 2
-    r4 = (solution['m2'] * solution['N4']) / 2
+    # Standard color palette to differentiate overlapping gears on shafts
+    colors = ['#1f77b4', '#ff7f0e', '#2ca02c', '#d62728', '#9467bd', '#8c564b']
     
-    # Define origins (assuming linear layout for simplicity)
-    # Stage 1
-    x1, y1 = 0, 0
-    x2, y2 = r1 + r2, 0 
+    for i, gear in enumerate(gears):
+        m, z = gear
+        radius = (m * z) / 2.0
+        
+        # Calculate center position based on connection type
+        if i > 0:
+            if connections[i-1] == 'MESH':
+                prev_m, prev_z = gears[i-1]
+                prev_radius = (prev_m * prev_z) / 2.0
+                current_x += (prev_radius + radius)
+            elif connections[i-1] == 'SHAFT':
+                # Center coordinates remain the same for concentric layout
+                pass 
+        
+        # Draw gear pitch circle
+        circle = Circle((current_x, current_y), radius, 
+                        facecolor=colors[i % len(colors)], 
+                        edgecolor='black', alpha=0.5, linewidth=1.5,
+                        label=f'G{i+1}: m={m}, z={z}')
+        ax.add_patch(circle)
+        
+        # Plot shaft center
+        ax.plot(current_x, current_y, 'k+', markersize=10)
+        
+        # Label above gear
+        ax.text(current_x, current_y + radius + (radius * 0.1), f'G{i+1}', 
+                ha='center', va='bottom', fontsize=9, fontweight='bold')
+
+    ax.autoscale()
+    ax.set_aspect('equal', adjustable='datalim')
+    ax.set_title("Gear Train Layout (Pitch Circles)")
+    ax.set_xlabel("Length Dimension (mm)")
+    ax.set_ylabel("Radial Dimension (mm)")
+    ax.grid(True, linestyle='--', alpha=0.6)
+    ax.legend(bbox_to_anchor=(1.05, 1), loc='upper left')
     
-    # Stage 2 (Input of stage 2 shares shaft with output of stage 1)
-    x3, y3 = x2, 0 
-    x4, y4 = x3 + r3 + r4, 0
-    
-    # Draw Gears as Circles
-    circle1 = plt.Circle((x1, y1), r1, color='blue', alpha=0.5, label='N1 (Drive 1)')
-    circle2 = plt.Circle((x2, y2), r2, color='lightblue', alpha=0.5, label='N2 (Driven 1)')
-    circle3 = plt.Circle((x3, y3), r3, color='red', alpha=0.5, label='N3 (Drive 2)')
-    circle4 = plt.Circle((x4, y4), r4, color='salmon', alpha=0.5, label='N4 (Driven 2)')
-    
-    ax.add_patch(circle1)
-    ax.add_patch(circle2)
-    ax.add_patch(circle3)
-    ax.add_patch(circle4)
-    
-    # Plot shaft centers
-    ax.plot([x1, x2, x4], [y1, y2, y4], 'ko', markersize=5)
-    
-    # Formatting
-    plt.title(f"Valid Configuration Found\nTarget Ratio: {TARGET_RATIO} | Actual: {solution['Ratio']:.2f}")
-    plt.xlim(-MAX_CENTER_DIST, MAX_CENTER_DIST * 2)
-    plt.ylim(-MAX_CENTER_DIST, MAX_CENTER_DIST)
-    plt.grid(True, linestyle='--', alpha=0.6)
-    plt.legend(loc="upper right")
-    
-    # Data text box
-    textstr = '\n'.join((
-        f"Stage 1: m={solution['m1']}, N1={solution['N1']}, N2={solution['N2']}",
-        f"Stage 2: m={solution['m2']}, N3={solution['N3']}, N4={solution['N4']}",
-        f"C1={solution['C1']:.1f}mm, C2={solution['C2']:.1f}mm"
-    ))
-    props = dict(boxstyle='round', facecolor='wheat', alpha=0.5)
-    ax.text(0.05, 0.95, textstr, transform=ax.transAxes, fontsize=10,
-            verticalalignment='top', bbox=props)
-    
+    plt.tight_layout()
     plt.show()
 
 # ==========================================
-# 5. MAIN EXECUTION
+# Example Usage
 # ==========================================
 if __name__ == "__main__":
-    valid_design = solve_gear_train_csp()
-    if valid_design:
-        print(f"Design Specs: {valid_design}")
-        visualize_gears(valid_design)
+    standard_gears = [
+        (1.0, 10), (1.0, 20), (1.0, 30), (1.0, 40), (1.0, 50),
+        (2.0, 10), (2.0, 15), (2.0, 20), (2.0, 25), (2.0, 30)
+    ]
+    
+    solution = solve_gear_train(
+        domain=standard_gears,
+        max_gears=6,
+        max_length=150.0,
+        max_width=80.0,
+        target_ratio=12.0,
+        tolerance=0.1
+    )
+    
+    import pprint
+    pprint.pprint(solution)
+    
+    # Check if a valid dictionary was returned, then visualize
+    if isinstance(solution, dict):
+        visualize_gear_train(solution['gears'], solution['connections'])
