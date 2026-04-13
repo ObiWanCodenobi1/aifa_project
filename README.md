@@ -248,7 +248,7 @@ Benchmarked over **50 randomly generated target ratios** ranging from 1.0 to 100
 
 ## Course Information
 
-This project was developed as part of a course in Artificial Intelligence / AI for Applications.
+This project was developed as part of a course in Artificial Intelligence / AI Foundations and Applications.
 
 **GitHub Repository:** [https://github.com/ObiWanCodenobi1/aifa_project](https://github.com/ObiWanCodenobi1/aifa_project)
 
